@@ -1,0 +1,66 @@
+{
+  "source": {
+    "type": "automation",
+    "automation_id": "20132cf6-fd93-80e7-8ac8-004d34cce7e2",
+    "action_id": "20132cf6-fd93-80ab-b560-005a06a74144",
+    "event_id": "85356d4a-27b4-4628-9ed9-0c45ccba8131",
+    "attempt": 1
+  },
+  "data": {
+    "object": "page",
+    "id": "20132cf6-fd93-80b9-83b8-d3bdb40b61cf",
+    "created_time": "2025-05-28T09:38:00.000Z",
+    "last_edited_time": "2025-05-31T04:18:00.000Z",
+    "created_by": {
+      "object": "user",
+      "id": "9431739f-2242-4b4c-8632-873a74973094"
+    },
+    "last_edited_by": {
+      "object": "user",
+      "id": "9431739f-2242-4b4c-8632-873a74973094"
+    },
+    "cover": null,
+    "icon": null,
+    "parent": {
+      "type": "database_id",
+      "database_id": "20132cf6-fd93-806e-9c59-cebf9eaa1e51"
+    },
+    "archived": false,
+    "in_trash": false,
+    "properties": {
+      "担当": {
+        "id": "IY%5CR",
+        "type": "select",
+        "select": { "id": "r~:T", "name": "だいき", "color": "yellow" }
+      },
+      "商談ステータス": {
+        "id": "sQG%7D",
+        "type": "status",
+        "status": { "id": "lg;[", "name": "失注", "color": "yellow" }
+      },
+      "企業名": {
+        "id": "title",
+        "type": "title",
+        "title": [
+          {
+            "type": "text",
+            "text": { "content": "テスト", "link": null },
+            "annotations": {
+              "bold": false,
+              "italic": false,
+              "strikethrough": false,
+              "underline": false,
+              "code": false,
+              "color": "default"
+            },
+            "plain_text": "テスト",
+            "href": null
+          }
+        ]
+      }
+    },
+    "url": "https://www.notion.so/20132cf6fd9380b983b8d3bdb40b61cf",
+    "public_url": null,
+    "request_id": "54c630da-9f14-44da-97ab-a499aefadbcc"
+  }
+}

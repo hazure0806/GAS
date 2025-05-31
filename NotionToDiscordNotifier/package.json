@@ -9,7 +9,8 @@
   "author": "",
   "license": "ISC",
   "devDependencies": {
-    "@types/google-apps-script": "^1.0.97"
+    "@types/google-apps-script": "^1.0.97",
+    "typescript": "^5.8.3"
   },
   "description": ""
 }
