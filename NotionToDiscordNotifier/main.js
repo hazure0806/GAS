@@ -309,12 +309,17 @@ function extractNotionInfo(notionPageData, executionLogs) {
   const getPlainText = (prop) => prop?.title?.[0]?.plain_text;
   const getStatusName = (prop) => prop?.status?.name;
   const getSelectName = (prop) => prop?.select?.name;
+  const getRichText = (prop) =>
+    prop && Array.isArray(prop.rich_text)
+      ? prop.rich_text.map((rt) => rt.plain_text).join("")
+      : null;
 
   const info = {
     kigyoMei: getPlainText(properties["企業名"]) || "企業名不明",
     status: getStatusName(properties["商談ステータス"]) || null,
     tanto: getSelectName(properties["担当"]) || null,
     sharoushi: getStatusName(properties["社労士連携"]) || null,
+    nextAction: getRichText(properties["次回アクション"]) || null,
     pageUrl: notionPageData.url || "URL不明",
     lastEditedTime: notionPageData.last_edited_time
       ? Utilities.formatDate(
@@ -325,7 +330,7 @@ function extractNotionInfo(notionPageData, executionLogs) {
       : "日時不明",
   };
   executionLogs.push(
-    `Extracted Info => 企業名: ${info.kigyoMei}, ステータス: ${info.status || "N/A"}, 担当: ${info.tanto || "N/A"}, 社労士連携: ${info.sharoushi || "N/A"}`
+    `Extracted Info => 企業名: ${info.kigyoMei}, ステータス: ${info.status || "N/A"}, 担当: ${info.tanto || "N/A"}, 社労士連携: ${info.sharoushi || "N/A"}, 次回アクション: ${info.nextAction ? "あり" : "なし"}`
   );
   return info;
 }
@@ -465,7 +470,7 @@ function handleNotifications(previousInfo, currentInfo, config, executionLogs) {
  * @return {string} Discordメッセージ文字列。
  */
 function createStatusChangeMessage(previousInfo, currentInfo) {
-  const { kigyoMei, pageUrl, lastEditedTime } = currentInfo;
+  const { kigyoMei, pageUrl, lastEditedTime, nextAction } = currentInfo;
   let messageBody = `**企業名:** ${kigyoMei}\n`;
 
   // nullの場合の表示文字列を定義
@@ -488,10 +493,19 @@ function createStatusChangeMessage(previousInfo, currentInfo) {
     messageBody += `**担当:** ${currentTanto}\n`;
   }
 
+  messageBody += `**次回アクション:**\n`;
+  if (nextAction) {
+    // 内容がある場合はコードブロックで表示
+    messageBody += `\`\`\`\n${nextAction}\n\`\`\`\n`;
+  } else {
+    // 内容がない場合は (未設定) と表示
+    messageBody += `(未設定)\n`;
+  }
+
   messageBody += `**最終更新日時:** ${lastEditedTime}\n`;
 
   return (
-    `**【商談ステータス】更新通知** 📢\n` +
+    `**Notion顧客情報 更新通知** 📢\n` +
     `------------------------------------\n` +
     messageBody +
     `------------------------------------\n` +
