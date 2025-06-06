@@ -2,17 +2,9 @@
 // スクリプトプロパティから設定値を読み込む
 // ------------------------------------------------------------------------------------
 const PROP_KEY_SPREADSHEET_ID = "SPREADSHEET_ID_SECRET";
-const PROP_KEY_SHEET_NAME = "SHEET_NAME_VALUE";
+const PROP_KEY_SHEET_NAME = "SHEET_NAME_VALUE"; // これはログ用シート名
 const PROP_KEY_DISCORD_URL = "DISCORD_WEBHOOK_URL_SECRET";
 
-/**
- * スクリプトプロパティから指定されたキーの値を取得します。
- * 見つからない場合や値がnullの場合は、defaultValueを返します。
- * defaultValueもnullで値が見つからない場合はnullを返しますが、警告ログを出力します。
- * @param {string} key 取得するプロパティのキー。
- * @param {any} [defaultValue=null] プロパティが見つからない場合に返すデフォルト値。
- * @return {string|null} プロパティの値、またはデフォルト値、またはnull。
- */
 function getScriptPropertyValue(key, defaultValue = null) {
   const properties = PropertiesService.getScriptProperties();
   const value = properties.getProperty(key);
@@ -23,13 +15,18 @@ function getScriptPropertyValue(key, defaultValue = null) {
 }
 
 const SPREADSHEET_ID = getScriptPropertyValue(PROP_KEY_SPREADSHEET_ID);
-const SHEET_NAME = getScriptPropertyValue(
+const LOG_SHEET_NAME = getScriptPropertyValue(
   PROP_KEY_SHEET_NAME,
   "NotionWebhookLog"
 );
 const DISCORD_WEBHOOK_URL = getScriptPropertyValue(PROP_KEY_DISCORD_URL);
 
-const HEADERS = [
+// ★★★ 新しい設定項目 ★★★
+const STATE_SHEET_NAME = "ページ状態履歴"; // ページの状態を記憶するシート名
+const STATE_HEADERS = ["Page ID", "Last Known Properties (JSON)"]; // 状態保存シートのヘッダー
+// ★★★★★★★★★★★★★★
+
+const LOG_HEADERS = [
   "受信日時",
   "受信データ (raw)",
   "イベント全体 (raw)",
@@ -44,88 +41,81 @@ const HEADERS = [
 // ------------------------------------------------------------------------------------
 // メイン処理
 // ------------------------------------------------------------------------------------
-/**
- * Handles HTTP POST requests to the web app.
- * Expected to be called by Notion's webhook automation.
- * @param {GoogleAppsScript.Events.DoPost} e The event parameter for a POST request.
- * @return {GoogleAppsScript.Content.TextOutput} A TextOutput response.
- */
 function doPost(e) {
   let executionLogs = [];
   executionLogs.push("--- doPost Execution Start ---");
-
   let overallStatus = "成功";
   let discordSendStatus = "未処理";
-  let errorForSheet = "";
-
-  let sheet;
   let timestamp = new Date();
-  let webhookData = {
-    rawContents: "N/A",
-    fullEventString: "N/A",
-    notionPageData: null,
-  };
+  let webhookData = null;
   let extractedNotionInfo = null;
+  let logSheet, stateSheet;
 
   try {
     if (!SPREADSHEET_ID) {
       throw new Error(
-        `Script Property "${PROP_KEY_SPREADSHEET_ID}" is not set or empty.`
+        `Script Property "${PROP_KEY_SPREADSHEET_ID}" is not set.`
       );
     }
-    sheet = getOrCreateSheet(SPREADSHEET_ID, SHEET_NAME, HEADERS);
+    // ログ用シートと状態保存用シートの両方を取得
+    logSheet = getOrCreateSheet(SPREADSHEET_ID, LOG_SHEET_NAME, LOG_HEADERS);
+    stateSheet = getOrCreateSheet(
+      SPREADSHEET_ID,
+      STATE_SHEET_NAME,
+      STATE_HEADERS
+    );
+
     webhookData = parseWebhookEvent(e, executionLogs);
-
     if (!webhookData.notionPageData) {
-      executionLogs.push("Notion page data is not available.");
-      overallStatus = "Notionデータなし";
-      discordSendStatus = "スキップ（Notionデータなし）";
-      logToSheet(
-        sheet,
-        timestamp,
-        webhookData.rawContents,
-        webhookData.fullEventString,
-        null,
-        overallStatus,
-        discordSendStatus,
-        executionLogs
-      );
-      return ContentService.createTextOutput(
-        JSON.stringify({
-          status: "error",
-          message: "Notion page data not found.",
-        })
-      ).setMimeType(ContentService.MimeType.JSON);
+      throw new Error("Notion page data could not be parsed from webhook.");
     }
 
+    const pageId = webhookData.notionPageData.id;
+    if (!pageId) throw new Error("Page ID is missing in the webhook data.");
+
+    // 1. 以前の状態を取得
+    const previousState = getPreviousState(stateSheet, pageId, executionLogs);
+    const previousProperties = previousState ? previousState.properties : null;
+
+    // 2. 現在の状態と以前の状態から、通知に必要な情報を抽出
     extractedNotionInfo = extractNotionInfo(
       webhookData.notionPageData,
       executionLogs
     );
-    const discordResult = sendDiscordNotificationAndGetStatus(
+    const previousNotionInfo = previousProperties
+      ? extractNotionInfo({ properties: previousProperties }, executionLogs)
+      : null;
+
+    // 3. 状態を比較し、Discordに通知
+    const discordResult = sendStateChangeDiscordNotification(
+      previousNotionInfo,
       extractedNotionInfo,
       DISCORD_WEBHOOK_URL,
       executionLogs
     );
     discordSendStatus = discordResult.status;
-
     if (discordResult.error) {
-      errorForSheet = "Discord送信エラー: " + discordResult.error;
-      overallStatus = overallStatus === "成功" ? "一部エラー" : overallStatus;
+      overallStatus = "一部エラー";
     }
-  } catch (error) {
-    executionLogs.push(
-      `Critical Error in doPost: ${error.toString()}${error.stack ? "\nStack: " + error.stack : ""}`
+
+    // 4. 現在の状態で「ページ状態履歴」シートを更新
+    updateCurrentState(
+      stateSheet,
+      pageId,
+      webhookData.notionPageData.properties,
+      previousState ? previousState.rowIndex : -1,
+      executionLogs
     );
+  } catch (error) {
+    executionLogs.push(`Critical Error in doPost: ${error.toString()}`);
     overallStatus = "致命的エラー";
-    errorForSheet = "全体処理エラー: " + error.toString();
   } finally {
-    if (sheet) {
+    if (logSheet) {
+      // 5. 処理結果をログシートに記録
       logToSheet(
-        sheet,
+        logSheet,
         timestamp,
-        webhookData.rawContents,
-        webhookData.fullEventString,
+        webhookData,
         extractedNotionInfo,
         overallStatus,
         discordSendStatus,
@@ -133,7 +123,7 @@ function doPost(e) {
       );
     } else {
       Logger.log(
-        `CRITICAL: Sheet object was not available. Logs: ${executionLogs.join("\n")}`
+        `CRITICAL: Log sheet was not available. Logs: ${executionLogs.join("\n")}`
       );
     }
   }
@@ -142,25 +132,161 @@ function doPost(e) {
   Logger.log(executionLogs.join("\n"));
 
   return ContentService.createTextOutput(
-    JSON.stringify({
-      status: overallStatus,
-      message: errorForSheet || "Webhook processed.",
-    })
+    JSON.stringify({ status: overallStatus, message: "Webhook processed." })
   ).setMimeType(ContentService.MimeType.JSON);
 }
 
 // ------------------------------------------------------------------------------------
-// ヘルパー関数群
+// ヘルパー関数群 (★マークは新規または大幅修正された関数)
 // ------------------------------------------------------------------------------------
+/**
+ * ★ 以前の状態を「ページ状態履歴」シートから取得します。
+ * @param {Sheet} stateSheet - 状態を保存しているシート。
+ * @param {string} pageId - 検索対象のNotionページID。
+ * @param {Array<string>} executionLogs - 実行ログ配列。
+ * @return {object|null} 見つかった場合は { rowIndex, properties }、見つからなければ null。
+ */
+function getPreviousState(stateSheet, pageId, executionLogs) {
+  executionLogs.push(`Searching for previous state of page ID: ${pageId}`);
+  const dataRange = stateSheet.getDataRange();
+  const values = dataRange.getValues();
+  // ヘッダー行を除き、下から検索（最新の状態が見つかりやすいため）
+  for (let i = values.length - 1; i > 0; i--) {
+    if (values[i][0] === pageId) {
+      // 1列目 (A列) が Page ID
+      executionLogs.push(`Previous state found at row ${i + 1}.`);
+      try {
+        const properties = JSON.parse(values[i][1]); // 2列目 (B列) がプロパティJSON
+        return { rowIndex: i + 1, properties: properties };
+      } catch (e) {
+        executionLogs.push(
+          `ERROR: Failed to parse stored JSON for page ${pageId} at row ${i + 1}.`
+        );
+        return null; // パースに失敗した場合は状態なしとして扱う
+      }
+    }
+  }
+  executionLogs.push("No previous state found for this page.");
+  return null;
+}
 
 /**
- * 指定されたIDのスプレッドシートを開き、指定された名前のシートを取得または作成します。
- * @param {string} spreadsheetId 操作対象のスプレッドシートID。
- * @param {string} sheetName 操作対象のシート名。
- * @param {Array<string>} headers シートが新規作成された場合に追加するヘッダー行。
- * @return {GoogleAppsScript.Spreadsheet.Sheet} Apps ScriptのSheetオブジェクト。
- * @throws {Error} スプレッドシートのアクセスや設定に失敗した場合
+ * ★ 現在の状態で「ページ状態履歴」シートを更新または新規作成します。
+ * @param {Sheet} stateSheet - 状態を保存しているシート。
+ * @param {string} pageId - 対象のNotionページID。
+ * @param {object} newProperties - 保存する新しいプロパティオブジェクト。
+ * @param {number} rowIndex - 更新対象の行番号。見つかっていない場合は -1。
+ * @param {Array<string>} executionLogs - 実行ログ配列。
  */
+function updateCurrentState(
+  stateSheet,
+  pageId,
+  newProperties,
+  rowIndex,
+  executionLogs
+) {
+  const newPropertiesJson = JSON.stringify(newProperties);
+  if (rowIndex > -1) {
+    // 既存の行を更新
+    stateSheet.getRange(rowIndex, 2).setValue(newPropertiesJson); // B列を更新
+    executionLogs.push(`Updated state for page ${pageId} at row ${rowIndex}.`);
+  } else {
+    // 新しい行を追加
+    stateSheet.appendRow([pageId, newPropertiesJson]);
+    executionLogs.push(`Appended new state for page ${pageId}.`);
+  }
+}
+
+/**
+ * ★ 変更前後の情報をもとにDiscordへ通知します。
+ * @param {object|null} previousInfo - 変更前の情報。
+ * @param {object} currentInfo - 変更後の情報。
+ * @param {string} discordWebhookUrl - Discord Webhook URL。
+ * @param {Array<string>} executionLogs - 実行ログ配列。
+ * @return {object} 送信結果。
+ */
+function sendStateChangeDiscordNotification(
+  previousInfo,
+  currentInfo,
+  discordWebhookUrl,
+  executionLogs
+) {
+  executionLogs.push("Preparing state-change Discord notification...");
+  let result = { status: "未処理", error: null };
+
+  if (!currentInfo) {
+    result.status = "スキップ（現在情報なし）";
+    return result;
+  }
+
+  const { kigyoMei, status, tanto, pageUrl, lastEditedTime } = currentInfo;
+  let messageBody = "";
+
+  if (previousInfo) {
+    // 変更履歴がある場合
+    const prevStatus = previousInfo.status || "（不明）";
+    const prevTanto = previousInfo.tanto || "（不明）";
+
+    messageBody = `**企業名:** ${kigyoMei}\n`;
+    if (currentInfo.status !== prevStatus) {
+      messageBody += `**商談ステータス:** **\`${prevStatus}\`** → **\`${currentInfo.status}\`** に変更\n`;
+    } else {
+      messageBody += `**商談ステータス:** ${currentInfo.status}\n`;
+    }
+    if (currentInfo.tanto !== prevTanto) {
+      messageBody += `**担当:** **\`${prevTanto}\`** → **\`${currentInfo.tanto}\`** に変更\n`;
+    } else {
+      messageBody += `**担当:** ${currentInfo.tanto}\n`;
+    }
+    messageBody += `**最終更新日時:** ${lastEditedTime}\n`;
+  } else {
+    // 初回通知の場合
+    messageBody =
+      `**企業名:** ${kigyoMei}\n` +
+      `**商談ステータス:** ${status}\n` +
+      `**担当:** ${tanto}\n` +
+      `**最終更新日時:** ${lastEditedTime}\n`;
+  }
+
+  const discordMessageContent =
+    `**Notion顧客情報 更新通知** 📢\n` +
+    `------------------------------------\n` +
+    messageBody +
+    `------------------------------------\n` +
+    `詳細はこちら: ${pageUrl}`;
+
+  // (Discordへの送信ロジックは以前のものを流用)
+  if (
+    discordWebhookUrl &&
+    discordWebhookUrl.startsWith("https://discord.com/api/webhooks/")
+  ) {
+    try {
+      const payload = JSON.stringify({ content: discordMessageContent });
+      const options = {
+        method: "post",
+        contentType: "application/json",
+        payload: payload,
+      };
+      UrlFetchApp.fetch(discordWebhookUrl, options);
+      executionLogs.push("Successfully sent message to Discord.");
+      result.status = "送信成功";
+    } catch (discordError) {
+      executionLogs.push(
+        `ERROR: Sending message to Discord failed: ${discordError.toString()}`
+      );
+      result.status = "送信エラー";
+      result.error = discordError.toString();
+    }
+  } else {
+    executionLogs.push(
+      "WARN: DISCORD_WEBHOOK_URL is not configured or invalid. Skipping notification."
+    );
+    result.status = "URL未設定/不正のためスキップ";
+  }
+  return result;
+}
+
+// --- 以下の関数はほぼ変更なし ---
 function getOrCreateSheet(spreadsheetId, sheetName, headers) {
   try {
     const spreadsheet = SpreadsheetApp.openById(spreadsheetId);
@@ -179,13 +305,8 @@ function getOrCreateSheet(spreadsheetId, sheetName, headers) {
   }
 }
 
-/**
- * Webhookイベントオブジェクト(e)を解析し、主要なデータを抽出します。
- * @param {object} e doPostから渡されるイベントオブジェクト。
- * @param {Array<string>} executionLogs 実行ログを格納する配列。
- * @return {object} 解析されたデータを含むオブジェクト { rawContents, fullEventString, notionPageData }。
- */
 function parseWebhookEvent(e, executionLogs) {
+  // (変更なし、以前のコードのまま)
   executionLogs.push("Parsing webhook event...");
   let rawContents = "N/A";
   let fullEventString = "N/A";
@@ -233,13 +354,8 @@ function parseWebhookEvent(e, executionLogs) {
   return { rawContents, fullEventString, notionPageData };
 }
 
-/**
- * Notionのページデータオブジェクトから指定された情報を抽出します。
- * @param {object} notionPageData Notionのページデータ。
- * @param {Array<string>} executionLogs 実行ログを格納する配列。
- * @return {object} 抽出された情報 { kigyoMei, status, tanto, pageUrl, lastEditedTime }。
- */
 function extractNotionInfo(notionPageData, executionLogs) {
+  // (引数から executionLogs を受け取るようにしたが、処理自体はほぼ変更なし)
   executionLogs.push("Extracting Notion info...");
   let kigyoMei = "取得失敗";
   let status = "取得失敗";
@@ -265,101 +381,27 @@ function extractNotionInfo(notionPageData, executionLogs) {
     executionLogs.push("WARN: Failed to extract '担当'.");
   }
 
-  executionLogs.push(
-    `Extracted => 企業名: ${kigyoMei}, ステータス: ${status}, 担当: ${tanto}`
-  );
+  // executionLogs.push(`Extracted => 企業名: ${kigyoMei}, ステータス: ${status}, 担当: ${tanto}`); // メッセージ作成側でログるので重複を避ける
   return { kigyoMei, status, tanto, pageUrl, lastEditedTime };
 }
 
-/**
- * 抽出されたNotion情報からDiscordへの通知メッセージを作成し送信し、結果を返します。
- * @param {object} notionInfo extractNotionInfoから返されるオブジェクト。
- * @param {string} discordWebhookUrl 送信先のDiscord Webhook URL。
- * @param {Array<string>} executionLogs 実行ログを格納する配列。
- * @return {object} 送信結果 { status: string, error: string|null }。
- */
-function sendDiscordNotificationAndGetStatus(
-  notionInfo,
-  discordWebhookUrl,
-  executionLogs
-) {
-  executionLogs.push("Preparing Discord notification...");
-  let result = { status: "未実行", error: null };
-
-  if (!notionInfo) {
-    executionLogs.push(
-      "Notion info is not available, skipping Discord notification."
-    );
-    result.status = "スキップ（Notion情報なし）";
-    return result;
-  }
-  const { kigyoMei, status, tanto, pageUrl, lastEditedTime } = notionInfo;
-  const discordMessageContent =
-    `**Notion顧客情報 更新通知** 📢\n` +
-    `------------------------------------\n` +
-    `**企業名:** ${kigyoMei}\n` +
-    `**商談ステータス:** ${status}\n` +
-    `**担当:** ${tanto}\n` +
-    `**最終更新日時:** ${lastEditedTime}\n` +
-    `------------------------------------\n` +
-    `詳細はこちら: ${pageUrl}`;
-
-  if (
-    discordWebhookUrl &&
-    discordWebhookUrl.startsWith("https://discord.com/api/webhooks/")
-  ) {
-    try {
-      const payload = JSON.stringify({ content: discordMessageContent });
-      const options = {
-        method: "post",
-        contentType: "application/json",
-        payload: payload,
-      };
-      UrlFetchApp.fetch(discordWebhookUrl, options);
-      executionLogs.push("Successfully sent message to Discord.");
-      result.status = "送信成功";
-    } catch (discordError) {
-      executionLogs.push(
-        `ERROR: Sending message to Discord failed: ${discordError.toString()}`
-      );
-      result.status = "送信エラー";
-      result.error = discordError.toString();
-    }
-  } else {
-    executionLogs.push(
-      "WARN: DISCORD_WEBHOOK_URL is not configured or invalid. Skipping notification."
-    );
-    result.status = "URL未設定/不正のためスキップ";
-  }
-  return result;
-}
-
-/**
- * 指定されたシートにデータを追記します。
- * @param {GoogleAppsScript.Spreadsheet.Sheet} sheet 書き込み対象のApps ScriptのSheetオブジェクト。
- * @param {Date} timestamp 受信日時。
- * @param {string} rawContents Webhookの生データコンテンツ。
- * @param {string} fullEventString イベントオブジェクト全体の文字列。
- * @param {object | null} notionInfo extractNotionInfoから返されるオブジェクト、またはデータがない場合はnull。
- * @param {string} overallStatus 全体処理のステータス。
- * @param {string} discordSendStatus Discord通知の結果ステータス。
- * @param {Array<string>} executionLogs 実行ログ（文字列の配列）。
- */
 function logToSheet(
   sheet,
   timestamp,
-  rawContents,
-  fullEventString,
+  webhookData,
   notionInfo,
   overallStatus,
   discordSendStatus,
   executionLogs
 ) {
+  // (引数を少し整理)
   const executionLogsString = executionLogs.join("\n");
   try {
     const kigyoMei = notionInfo ? notionInfo.kigyoMei : "N/A";
     const status = notionInfo ? notionInfo.status : "N/A";
     const tanto = notionInfo ? notionInfo.tanto : "N/A";
+    const rawContents = webhookData ? webhookData.rawContents : "N/A";
+    const fullEventString = webhookData ? webhookData.fullEventString : "N/A";
 
     sheet.appendRow([
       timestamp,
@@ -375,9 +417,6 @@ function logToSheet(
   } catch (error) {
     Logger.log(
       `CRITICAL: Error appending final log to spreadsheet: ${error.toString()}`
-    );
-    Logger.log(
-      `Data attempted to log: Timestamp: ${timestamp}, Overall: ${overallStatus}, Discord: ${discordSendStatus}, Logs: ${executionLogsString}`
     );
   }
 }
