@@ -1,0 +1,11 @@
+{
+  "extends": ["google", "plugin:googleappsscript/recommended"],
+  "parserOptions": {
+    "ecmaVersion": 2020
+  },
+  "rules": {
+    "require-jsdoc": "off",
+    "valid-jsdoc": "off",
+    "new-cap": "off"
+  }
+}

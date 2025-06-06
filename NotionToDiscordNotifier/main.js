@@ -4,6 +4,7 @@
 const PROP_KEY_SPREADSHEET_ID = "SPREADSHEET_ID_SECRET";
 const PROP_KEY_SHEET_NAME = "SHEET_NAME_VALUE"; // これはログ用シート名
 const PROP_KEY_DISCORD_URL = "DISCORD_WEBHOOK_URL_SECRET";
+const PROP_KEY_DISCORD_URL_SHAROUSHI = "DISCORD_WEBHOOK_URL_SHAROUSHI";
 
 function getScriptPropertyValue(key, defaultValue = null) {
   const properties = PropertiesService.getScriptProperties();
@@ -20,6 +21,9 @@ const LOG_SHEET_NAME = getScriptPropertyValue(
   "NotionWebhookLog"
 );
 const DISCORD_WEBHOOK_URL = getScriptPropertyValue(PROP_KEY_DISCORD_URL);
+const DISCORD_WEBHOOK_URL_SHAROUSHI = getScriptPropertyValue(
+  PROP_KEY_DISCORD_URL_SHAROUSHI
+);
 
 // ★★★ 新しい設定項目 ★★★
 const STATE_SHEET_NAME = "ページ状態履歴"; // ページの状態を記憶するシート名
@@ -45,7 +49,7 @@ function doPost(e) {
   let executionLogs = [];
   executionLogs.push("--- doPost Execution Start ---");
   let overallStatus = "成功";
-  let discordSendStatus = "未処理";
+  let discordSendStatus = [];
   let timestamp = new Date();
   let webhookData = null;
   let extractedNotionInfo = null;
@@ -87,16 +91,37 @@ function doPost(e) {
       : null;
 
     // 3. 状態を比較し、Discordに通知
-    const discordResult = sendStateChangeDiscordNotification(
-      previousNotionInfo,
-      extractedNotionInfo,
-      DISCORD_WEBHOOK_URL,
-      executionLogs
-    );
-    discordSendStatus = discordResult.status;
-    if (discordResult.error) {
-      overallStatus = "一部エラー";
+    // ★★★ 通知の分岐ロジック ★★★
+    // 1. ステータス変更の通知
+    if (
+      !previousNotionInfo ||
+      previousNotionInfo.status !== extractedNotionInfo.status
+    ) {
+      const result = sendStateChangeDiscordNotification(
+        previousNotionInfo,
+        extractedNotionInfo,
+        DISCORD_WEBHOOK_URL,
+        executionLogs
+      );
+      discordSendStatus.push(`ステータス通知: ${result.status}`);
+      if (result.error) overallStatus = "一部エラー";
     }
+
+    // 2. 社労士連携の通知
+    if (
+      !previousNotionInfo ||
+      previousNotionInfo.sharoushi !== extractedNotionInfo.sharoushi
+    ) {
+      const result = sendSharoushiDiscordNotification(
+        previousNotionInfo,
+        extractedNotionInfo,
+        DISCORD_WEBHOOK_URL_SHAROUSHI,
+        executionLogs
+      );
+      discordSendStatus.push(`社労士連携通知: ${result.status}`);
+      if (result.error) overallStatus = "一部エラー";
+    }
+    // ★★★★★★★★★★★★★★★★★★
 
     // 4. 現在の状態で「ページ状態履歴」シートを更新
     updateCurrentState(
@@ -211,8 +236,9 @@ function sendStateChangeDiscordNotification(
   discordWebhookUrl,
   executionLogs
 ) {
+  // (変更なし、以前のコードのまま)
   executionLogs.push("Preparing state-change Discord notification...");
-  let result = { status: "未処理", error: null };
+  let result = { status: "未実行", error: null };
 
   if (!currentInfo) {
     result.status = "スキップ（現在情報なし）";
@@ -223,7 +249,6 @@ function sendStateChangeDiscordNotification(
   let messageBody = "";
 
   if (previousInfo) {
-    // 変更履歴がある場合
     const prevStatus = previousInfo.status || "（不明）";
     const prevTanto = previousInfo.tanto || "（不明）";
 
@@ -240,7 +265,6 @@ function sendStateChangeDiscordNotification(
     }
     messageBody += `**最終更新日時:** ${lastEditedTime}\n`;
   } else {
-    // 初回通知の場合
     messageBody =
       `**企業名:** ${kigyoMei}\n` +
       `**商談ステータス:** ${status}\n` +
@@ -255,7 +279,6 @@ function sendStateChangeDiscordNotification(
     `------------------------------------\n` +
     `詳細はこちら: ${pageUrl}`;
 
-  // (Discordへの送信ロジックは以前のものを流用)
   if (
     discordWebhookUrl &&
     discordWebhookUrl.startsWith("https://discord.com/api/webhooks/")
@@ -354,35 +377,128 @@ function parseWebhookEvent(e, executionLogs) {
   return { rawContents, fullEventString, notionPageData };
 }
 
+/**
+ * ★ Notionページデータから「社労士連携」カラムの値も含めて抽出します。
+ */
 function extractNotionInfo(notionPageData, executionLogs) {
-  // (引数から executionLogs を受け取るようにしたが、処理自体はほぼ変更なし)
   executionLogs.push("Extracting Notion info...");
   let kigyoMei = "取得失敗";
   let status = "取得失敗";
   let tanto = "取得失敗";
+  let sharoushi = null; // ★ 社労士連携カラムの値
   const pageUrl = notionPageData.url || "URL不明";
   const lastEditedTime = notionPageData.last_edited_time
     ? new Date(notionPageData.last_edited_time).toLocaleString("ja-JP")
     : "日時不明";
 
-  if (notionPageData.properties?.["企業名"]?.title?.[0]?.plain_text) {
-    kigyoMei = notionPageData.properties["企業名"].title[0].plain_text;
-  } else {
-    executionLogs.push("WARN: Failed to extract '企業名'.");
-  }
-  if (notionPageData.properties?.["商談ステータス"]?.status?.name) {
-    status = notionPageData.properties["商談ステータス"].status.name;
-  } else {
-    executionLogs.push("WARN: Failed to extract '商談ステータス'.");
-  }
-  if (notionPageData.properties?.["担当"]?.select?.name) {
-    tanto = notionPageData.properties["担当"].select.name;
-  } else {
-    executionLogs.push("WARN: Failed to extract '担当'.");
+  const properties = notionPageData.properties;
+  if (!properties) {
+    executionLogs.push(
+      "ERROR: 'properties' object is missing in notionPageData."
+    );
+    return { kigyoMei, status, tanto, sharoushi, pageUrl, lastEditedTime };
   }
 
-  // executionLogs.push(`Extracted => 企業名: ${kigyoMei}, ステータス: ${status}, 担当: ${tanto}`); // メッセージ作成側でログるので重複を避ける
-  return { kigyoMei, status, tanto, pageUrl, lastEditedTime };
+  if (properties["企業名"]?.title?.[0]?.plain_text) {
+    kigyoMei = properties["企業名"].title[0].plain_text;
+  }
+  if (properties["商談ステータス"]?.status?.name) {
+    status = properties["商談ステータス"].status.name;
+  }
+  if (properties["担当"]?.select?.name) {
+    tanto = properties["担当"].select.name;
+  }
+
+  // ★★★ 「社労士連携」カラムの抽出 ★★★
+  const sharoushiProp = properties["社労士連携"];
+  if (sharoushiProp && sharoushiProp.status) {
+    // 型が「ステータス」なので、.status.name で値（例：「連携済み」）を取得します
+    sharoushi = sharoushiProp.status.name;
+  } else {
+    executionLogs.push(
+      "WARN: Failed to extract '社労士連携' status or property is empty."
+    );
+    sharoushi = sharoushiProp ? "（ステータス未設定）" : "カラムなし";
+  }
+
+  executionLogs.push(
+    `Extracted => 企業名: ${kigyoMei}, ステータス: ${status}, 担当: ${tanto}, 社労士連携: ${sharoushi}`
+  );
+  return { kigyoMei, status, tanto, sharoushi, pageUrl, lastEditedTime };
+}
+
+/**
+ * ★ 社労士連携の変更を通知するための新しい関数
+ */
+function sendSharoushiDiscordNotification(
+  previousInfo,
+  currentInfo,
+  discordWebhookUrl,
+  executionLogs
+) {
+  executionLogs.push("Preparing Sharoushi notification...");
+  let result = { status: "未処理", error: null };
+
+  if (!currentInfo) {
+    result.status = "スキップ（現在情報なし）";
+    return result;
+  }
+
+  const { kigyoMei, sharoushi, pageUrl } = currentInfo;
+  const prevSharoushi = previousInfo
+    ? previousInfo.sharoushi
+    : "（変更前データなし）";
+
+  // チェックボックスの場合を想定したメッセージ例
+  let changeMessage = "";
+  if (sharoushi === true) {
+    changeMessage = `**\`未チェック\`** → **\`チェック済み\`** に変更されました。`;
+  } else if (sharoushi === false) {
+    changeMessage = `**\`チェック済み\`** → **\`未チェック\`** に変更されました。`;
+  } else {
+    // セレクトやステータスの場合
+    changeMessage = `**\`${prevSharoushi}\`** → **\`${sharoushi}\`** に変更されました。`;
+  }
+
+  const discordMessageContent =
+    `**【社労士連携】**\n` +
+    `------------------------------------\n` +
+    `**企業名:** ${kigyoMei}\n` +
+    `**連携ステータス:** ${changeMessage}\n` +
+    `------------------------------------\n` +
+    `詳細はこちら: ${pageUrl}`;
+
+  // (Discordへの送信ロジックは流用)
+  if (
+    discordWebhookUrl &&
+    discordWebhookUrl.startsWith("https://discord.com/api/webhooks/")
+  ) {
+    try {
+      const payload = JSON.stringify({ content: discordMessageContent });
+      const options = {
+        method: "post",
+        contentType: "application/json",
+        payload: payload,
+      };
+      UrlFetchApp.fetch(discordWebhookUrl, options);
+      executionLogs.push(
+        "Successfully sent Sharoushi notification to Discord."
+      );
+      result.status = "送信成功";
+    } catch (discordError) {
+      executionLogs.push(
+        `ERROR: Sending Sharoushi notification to Discord failed: ${discordError.toString()}`
+      );
+      result.status = "送信エラー";
+      result.error = discordError.toString();
+    }
+  } else {
+    executionLogs.push(
+      "WARN: Sharoushi DISCORD_WEBHOOK_URL is not configured. Skipping notification."
+    );
+    result.status = "URL未設定/不正のためスキップ";
+  }
+  return result;
 }
 
 function logToSheet(
