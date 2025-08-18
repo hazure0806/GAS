@@ -415,12 +415,13 @@ function handleNotifications(previousInfo, currentInfo, config, executionLogs) {
   // --- 意味のある変更があったかどうかを判定 ---
   // isNewPage: 新規作成されたページか
   const isNewPage = !previousInfo;
-  // needsStatusNotification: ステータス/担当が「新規設定」または「変更」されたか
+  // needsStatusNotification: ステータス/担当/次回アクションが「新規設定」または「変更」されたか
   const needsStatusNotification =
-    (isNewPage && (currentInfo.status || currentInfo.tanto)) ||
+    (isNewPage && currentInfo.status) ||
     (!isNewPage &&
       (previousInfo.status !== currentInfo.status ||
-        previousInfo.tanto !== currentInfo.tanto));
+        previousInfo.tanto !== currentInfo.tanto ||
+        previousInfo.nextAction !== currentInfo.nextAction));
 
   // needsSharoushiNotification: 社労士連携が「新規設定」または「変更」されたか
   const needsSharoushiNotification =
