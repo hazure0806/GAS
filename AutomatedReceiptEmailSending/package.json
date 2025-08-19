@@ -1,0 +1,23 @@
+{
+  "name": "automated-receipt-email-sending",
+  "version": "1.0.0",
+  "description": "領収書メールを半自動で送信するためのGASプロジェクト",
+  "main": "main.js",
+  "scripts": {
+    "push": "clasp push",
+    "push:force": "clasp push -f",
+    "open": "clasp open"
+  },
+  "keywords": [
+    "gas",
+    "google-apps-script"
+  ],
+  "author": "",
+  "license": "ISC",
+  "devDependencies": {
+    "@types/google-apps-script": "^1.0.83",
+    "eslint": "^8.57.0",
+    "eslint-config-google": "^0.14.0",
+    "eslint-plugin-googleappsscript": "^1.0.5"
+  }
+}
